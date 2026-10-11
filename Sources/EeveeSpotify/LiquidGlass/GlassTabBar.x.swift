@@ -43,6 +43,9 @@ enum GlassTabBar {
     private static weak var row: UIStackView?
     private static weak var platterView: UIView?
     private static var retries = 0
+    private static var rowRetries = 0
+    private static var pendingRetry = false
+    private static var retryLogged = false
     private static var launchTabApplied = false
     private static var filmKey: UInt8 = 0
     private static var platterLogged = false
@@ -59,17 +62,41 @@ enum GlassTabBar {
         options = UserDefaults.tabBarOptions
         if let stock { sync(stock) }
     }
+    // Launch layout can settle before the tab row finishes building, and nothing else
+    // may run until the next selection change — becoming active is the deterministic
+    // point where the finished hierarchy gets one more chance to sync.
+    private static let foregroundObserver = NotificationCenter.default.addObserver(
+        forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+    ) { _ in
+        if let stock { sync(stock) }
+    }
 
-    static func sync(_ stock: UIView) {
+    static func sync(_ stock: UIView, external: Bool = true) {
         _ = observer
         _ = tintObserver
+        _ = foregroundObserver
+        // A fresh external trigger (layout, selection change, foreground) restarts the
+        // structural retry budget; only consecutive timer-driven failures give up.
+        if external { rowRetries = 0; retryLogged = false }
         self.stock = stock
         let bar = systemBar(on: stock)
-        guard let row = tabRow(in: stock) else { return }
+        // The tab row builds asynchronously after launch and layout stops firing once
+        // it settles. These paths used to return without re-arming, so nothing called
+        // sync again until the next selection change or app switch — leaving Spotify's
+        // stock bar up in the meantime.
+        guard let row = tabRow(in: stock) else {
+            scheduleRetry(stock, "tab row not built yet")
+            return
+        }
         row.superview?.layoutIfNeeded()
 
         let tabs = row.arrangedSubviews.filter { !$0.isHidden && $0.bounds.width >= 20 }
-        guard !tabs.isEmpty else { return }
+        guard !tabs.isEmpty else {
+            scheduleRetry(stock, "tab row has no laid-out tabs yet")
+            return
+        }
+        rowRetries = 0
+        retryLogged = false
         let labels = Dictionary(tabs.map { (ObjectIdentifier($0), label(in: $0)) }) { first, _ in first }
         func labelOf(_ tab: UIView) -> UILabel? { labels[ObjectIdentifier(tab)] ?? nil }
         func title(_ tab: UIView) -> String? { labelOf(tab)?.text }
@@ -126,7 +153,7 @@ enum GlassTabBar {
         if let active, active < items.count, bar.selectedItem !== items[active] { bar.selectedItem = items[active] }
         if missing && retries < 40 {
             retries += 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { sync(stock) }
+            schedulePass(stock)
         }
 
         reveal(bar, over: stock, ready: !missing || retries >= 40)
@@ -140,7 +167,11 @@ enum GlassTabBar {
 
     // Spotify's own bar stays up until ours has every icon, so launch never shows an empty glass bar.
     private static func reveal(_ bar: GlassSystemTabBar, over stock: UIView, ready: Bool) {
-        guard ready else { return }
+        // Before the first reveal, hold back until every icon is in place. After it,
+        // keep Spotify's content suppressed on every pass even while icons are still
+        // settling — otherwise a stock subview Spotify re-shows would bleed through
+        // the translucent glass bar until the next fully-ready sync.
+        guard ready || !bar.isHidden else { return }
         for sub in stock.subviews where sub !== bar && sub.alpha != 0 {
             sub.alpha = 0
             sub.isUserInteractionEnabled = false
@@ -156,6 +187,31 @@ enum GlassTabBar {
         bar.layoutIfNeeded()
         UIView.animate(withDuration: 0.2) { bar.alpha = 1 }
         eeveeLog("[EeveeSpotify][Glass] Tab bar revealed after %d retries", retries)
+    }
+
+    // One queued pass at a time, so layout churn and the retry timers can't pile up.
+    private static func schedulePass(_ stock: UIView) {
+        guard !pendingRetry else { return }
+        pendingRetry = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            pendingRetry = false
+            sync(stock, external: false)
+        }
+    }
+
+    // The tab row can lag several passes behind the first layout. Keep re-arming until
+    // it lands, but only from timer-driven syncs: every external sync resets the budget
+    // above, and a row that never appears should not spin forever on its own.
+    private static func scheduleRetry(_ stock: UIView, _ why: String) {
+        rowRetries += 1
+        guard rowRetries <= 80 else {
+            if !retryLogged {
+                retryLogged = true
+                eeveeLog("[EeveeSpotify][Glass] Tab bar sync waiting: %@ (%d tries, backing off)", why, rowRetries - 1)
+            }
+            return
+        }
+        schedulePass(stock)
     }
 
     private static func applyTint(_ bar: GlassSystemTabBar) {

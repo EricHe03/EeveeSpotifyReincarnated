@@ -94,28 +94,48 @@ enum GlassNowPlayingBar {
     }
 
     private static func artworkRadius(_ artwork: UIView) -> CGFloat {
-        options.roundArtwork ? artwork.bounds.width / 2 : 12
+        let size = artwork.bounds.size
+        // A music-video thumbnail is landscape, so a width/2 radius would exceed its
+        // own height and round it into a blob. Clamp the radius to the shorter side.
+        let square = abs(size.width - size.height) < 1
+        let radius = options.roundArtwork && square ? size.width / 2 : 12
+        return min(radius, size.height / 2)
     }
 
     // The iPad bar is taller than the iPhone one, so a fixed 32...56pt window misses its artwork entirely.
     // The bar's own height is the limit instead, and the leftmost qualifying view wins.
+    //
+    // Music videos render a landscape (16:9) thumbnail where songs render square
+    // artwork. The old square-only filter skipped those entirely, leaving the video
+    // thumbnail unmasked and overflowing the capsule (issue #193). Square artwork is
+    // still preferred so ordinary playback keeps its existing behaviour.
     private static func findArtwork(in card: UIView) -> UIView? {
         let limit = card.bounds.height
         guard limit > 0 else { return nil }
-        var best: UIView?
-        var bestMinX = CGFloat.greatestFiniteMagnitude
+        var square: UIView?
+        var squareMinX = CGFloat.greatestFiniteMagnitude
+        var landscape: UIView?
+        var landscapeMinX = CGFloat.greatestFiniteMagnitude
         var queue = card.subviews
         while !queue.isEmpty {
             let view = queue.removeFirst()
             queue += view.subviews
             let size = view.bounds.size
-            guard size.width >= 24, size.width <= limit, abs(size.width - size.height) < 1 else { continue }
+            guard size.width >= 24, size.width <= limit else { continue }
             let minX = view.convert(view.bounds, to: card).minX
-            guard minX < card.bounds.width / 3, minX < bestMinX else { continue }
-            bestMinX = minX
-            best = view
+            guard minX < card.bounds.width / 3 else { continue }
+            if abs(size.width - size.height) < 1 {
+                guard minX < squareMinX else { continue }
+                squareMinX = minX
+                square = view
+            } else if size.height > 0, size.width / size.height >= 1.2, size.width / size.height <= 2.4 {
+                // Landscape video thumbnail. Bounded so wide bars/labels are not picked up.
+                guard minX < landscapeMinX else { continue }
+                landscapeMinX = minX
+                landscape = view
+            }
         }
-        return best
+        return square ?? landscape
     }
 
     private static func findCard(in root: UIView) -> UIView? {

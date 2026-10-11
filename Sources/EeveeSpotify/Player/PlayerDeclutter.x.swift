@@ -30,12 +30,15 @@ enum PlayerPart: String, CaseIterable, Codable {
         case .aboutArtist: return ["CreatorBiography"]
         case .relatedVideos: return ["VideoRecommendations"]
         case .songDNA: return ["SongDNA"]
-        case .liveEvents: return ["LiveEvents_", "OnTourEventCard"]
+        // OnTour_* renders the live-events card in the 9.1.9x scroll feed; the old
+        // marker pair missed it (verified against the 9.1.90 class list).
+        case .liveEvents: return ["LiveEvents_", "OnTourEventCard", "OnTour_"]
         case .exploreArtist: return ["WatchFeed"]
         case .releaseCountdown: return ["Prerelease"]
         case .credits: return ["Creator_Credits"]
         case .merch: return ["Merch_"]
-        case .recommendations: return ["RelatedContentRecommendations"]
+        // SmartShuffle_NPVScrollRecsCardImpl is the 9.1.9x recommendations card.
+        case .recommendations: return ["RelatedContentRecommendations", "SmartShuffle", "NPVScrollRecsCard"]
         default: return []
         }
     }
@@ -48,6 +51,25 @@ enum PlayerDeclutter {
     private static var loggedCards = Set<PlayerPart>()
     private static var cacheKey: UInt8 = 0
     private static let retryWindow: CFTimeInterval = 5
+    // Reports tagged so a new unclassified card is logged once, not on every layout pass.
+    private static var reportedCards = Set<String>()
+    private static let maxCardReports = 12
+
+    // "Hide parts" visibly failing (#189, #194) means a card matched no marker. Without
+    // the card's own class names there is no way to add one, so record them once per
+    // distinct card. Tagged so the field report names the offending class directly.
+    private static func reportUnclassified(_ cell: UIView, names: String, inScroll: Bool) {
+        guard reportedCards.count < maxCardReports else { return }
+        let classes = names
+            .components(separatedBy: "_")
+            .filter { $0.count > 4 }
+            .joined(separator: ",")
+        let tag = "\(inScroll ? "scroll" : "outside"):\(classes.prefix(180))"
+        guard reportedCards.insert(tag).inserted else { return }
+        writeDebugLog("[EeveeSpotify][Player] Unclassified \(inScroll ? "scroll card" : "card outside scroll feed"): \(classes.prefix(400))")
+        eeveeLog("[EeveeSpotify][Player] Unclassified card (%@): %@",
+                 inScroll ? "in scroll feed" : "outside scroll feed", String(classes.prefix(400)))
+    }
 
     private final class Verdict {
         weak var content: UIView?
@@ -114,8 +136,12 @@ enum PlayerDeclutter {
             if let id = view.accessibilityIdentifier { names += id }
             queue += view.subviews
         }
-        guard names.contains("NowPlaying_ScrollAPI") else { return (nil, false) }
+        guard names.contains("NowPlaying_ScrollAPI") else {
+            if hidden.contains(.allCards) { reportUnclassified(cell, names: names, inScroll: false) }
+            return (nil, false)
+        }
         let matched = PlayerPart.cards.first { part in part.cardMarkers.contains { names.contains($0) } }
+        if matched == nil, hidden.contains(.allCards) { reportUnclassified(cell, names: names, inScroll: true) }
         let part: PlayerPart?
         if let matched, hidden.contains(matched) {
             part = matched

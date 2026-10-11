@@ -321,6 +321,22 @@ private let propertyReplacements = [
     EeveePropertyReplacement(name: "watch_feed_section_enabled", scope: "ios-feature-search", modification: .setBool(false)),
 
     // ─────────────────────────────────────────────────────────────────────
+    // Rewarded / on-demand video ads, app-open ads and native ad elements
+    // Scope names verified present in the 9.1.90 binary. These modules had no
+    // scope-level coverage at all before: `ios-adsstandalone-rewardedad-impl`
+    // and `ios-adsstandalone-adonappopen-impl` are the scopes the RewardedAd /
+    // AdOnAppOpen services read, and `ios-nativeads-elementimpl` covers the
+    // native ad element factory that is separate from AdsPlatform_AdsImpl.
+    // ─────────────────────────────────────────────────────────────────────
+    EeveePropertyReplacement(scope: "ios-adsstandalone-rewardedad-impl", modification: .remove),
+    EeveePropertyReplacement(scope: "ios-adsstandalone-adonappopen-impl", modification: .remove),
+    EeveePropertyReplacement(scope: "ios-nativeads-elementimpl", modification: .remove),
+    // Explicitly kill the on-demand/rewarded switches even if the scope itself
+    // is re-fetched before our removal lands.
+    EeveePropertyReplacement(name: "enabled", scope: "ios-adsstandalone-rewardedad-impl", modification: .setBool(false)),
+    EeveePropertyReplacement(name: "enabled", scope: "ios-adsstandalone-adonappopen-impl", modification: .setBool(false)),
+
+    // ─────────────────────────────────────────────────────────────────────
     // Additional legacy / non-scoped ad flags
     // ─────────────────────────────────────────────────────────────────────
     EeveePropertyReplacement(name: "enable_popups", modification: .setBool(false)),

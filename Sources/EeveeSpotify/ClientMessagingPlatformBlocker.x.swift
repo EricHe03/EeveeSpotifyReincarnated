@@ -157,9 +157,12 @@ func activateClientMessagingPlatformBlocker() {
 
     let viewHooks: [(String, String, () -> Void)] = [
         (CMPBannerViewHook.targetName, "CMPBannerView", { CMPBannerViewGroup().activate() }),
-        (UpsellBannerElementUIHook.targetName, "UpsellBannerElementUI", { UpsellElementViewGroup().activate() }),
-        (PremiumUpsellBannerElementUIHook.targetName, "PremiumUpsellBannerElementUI", { UpsellElementViewGroup().activate() }),
-        (PremiumUpsellControlPanelHook.targetName, "PremiumUpsellControlPanel", { UpsellElementViewGroup().activate() }),
+        // These three share one group, and Orion's GroupRegistry treats a second
+        // activation of the same group as non-recoverable (orionError -> fatalError),
+        // so each activation has to be guarded against the group already being live.
+        (UpsellBannerElementUIHook.targetName, "UpsellBannerElementUI", { if !UpsellElementViewGroup.isActive { UpsellElementViewGroup().activate() } }),
+        (PremiumUpsellBannerElementUIHook.targetName, "PremiumUpsellBannerElementUI", { if !UpsellElementViewGroup.isActive { UpsellElementViewGroup().activate() } }),
+        (PremiumUpsellControlPanelHook.targetName, "PremiumUpsellControlPanel", { if !UpsellElementViewGroup.isActive { UpsellElementViewGroup().activate() } }),
     ]
 
     var activated = 0

@@ -25,6 +25,9 @@ struct SponsoredCtxAttachmentGroup: HookGroup {}
 struct ScrollFeedAdViewGroup: HookGroup {}
 struct ScrollFeedAdServiceGroup: HookGroup {}
 struct ScrollFeedAdControllerGroup: HookGroup {}
+struct AdsStandaloneServiceGroup: HookGroup {}
+struct NativeAdsServiceGroup: HookGroup {}
+struct AdsSurveyViewGroup: HookGroup {}
 
 private let killAdsServiceImpl         = true
 private let killInStreamAdsService     = true
@@ -44,6 +47,18 @@ private func adlog(_ what: String) {
 // reached the tester log and hid whether hooks actually attached.
 private func ablog(_ message: String) {
     writeDebugLog("[AdBlock] \(message)")
+}
+
+// Orion's GroupRegistry treats a second activation of the same group as a
+// NON-RECOVERABLE error — `activate()` -> `orionError("Group ... has already
+// been activated")` -> the global handler, which defaults to `fatalError`.
+// Several ad surfaces here deliberately share one group, so every activation
+// must be guarded. Unguarded, the tweak crashes at launch the moment two
+// classes sharing a group are both present, which 9.1.90 guarantees.
+@inline(__always)
+private func activateOnce<G: HookGroup>(_ group: G.Type, _ create: () -> G) {
+    guard !group.isActive else { return }
+    create().activate()
 }
 
 // Swift classes register in the ObjC runtime lazily, so NSClassFromString at
@@ -314,6 +329,90 @@ class HtmlAdElementUIKill: ClassHook<NSObject> {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Rewarded / on-demand and app-open ad module (AdsStandalone_RewardedAdImpl).
+// This module had no service-level coverage at all. 9.1.90 added
+// OnDemandAdEventLoggerService to it and the fetch controller / interrupting
+// video launcher are the pieces that actually play the video.
+// ─────────────────────────────────────────────────────────────────────
+class RewardedAdFetchControllerServiceKill: ClassHook<NSObject> {
+    typealias Group = AdsStandaloneServiceGroup
+    static let targetName =
+        "_TtC28AdsStandalone_RewardedAdImpl32RewardedAdFetchControllerService"
+
+    func load() {
+        adlog("RewardedAdFetchControllerService.load")
+    }
+}
+
+class OnDemandAdEventLoggerServiceKill: ClassHook<NSObject> {
+    typealias Group = AdsStandaloneServiceGroup
+    static let targetName =
+        "_TtC28AdsStandalone_RewardedAdImpl28OnDemandAdEventLoggerService"
+
+    func load() {
+        adlog("OnDemandAdEventLoggerService.load")
+    }
+}
+
+class InterruptingVideoAdLauncherImplKill: ClassHook<NSObject> {
+    typealias Group = AdsStandaloneServiceGroup
+    static let targetName =
+        "_TtC28AdsStandalone_RewardedAdImpl31InterruptingVideoAdLauncherImpl"
+
+    func load() {
+        adlog("InterruptingVideoAdLauncherImpl.load")
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Native ad element factory (NativeAds_ElementImpl) — separate from
+// AdsPlatform_AdsImpl, so the AdsServiceImpl kill never reached it.
+// ─────────────────────────────────────────────────────────────────────
+class NativeAdsElementServiceImplKill: ClassHook<NSObject> {
+    typealias Group = NativeAdsServiceGroup
+    static let targetName =
+        "_TtC21NativeAds_ElementImpl27NativeAdsElementServiceImpl"
+
+    func load() {
+        adlog("NativeAdsElementServiceImpl.load")
+    }
+}
+
+// DSA ad transparency is two surfaces: the view (below) and the service that
+// provisions it. Blocking both stops the notice being built at all.
+class DSAServiceImplKill: ClassHook<NSObject> {
+    typealias Group = NativeAdsServiceGroup
+    static let targetName =
+        "_TtC19AdsPlatform_DSAImpl14DSAServiceImpl"
+
+    func load() {
+        adlog("DSAServiceImpl.load")
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Ad-topic survey surface (AdsPlatform_ElementKit) — NEW in 9.1.90. This is a
+// survey Spotify shows about ad topics; it is ad-only, so it is hidden rather
+// than starved. Same hide-on-attach pattern as the other element-UIs.
+// ─────────────────────────────────────────────────────────────────────
+class AdTopicSurveyElementUIKill: ClassHook<NSObject> {
+    typealias Group = AdsSurveyViewGroup
+    static let targetName =
+        "_TtC22AdsPlatform_ElementKit22AdTopicSurveyElementUI"
+
+    func didMoveToSuperview() {
+        orig.didMoveToSuperview()
+        guard let view = target as? UIView else { return }
+        view.isHidden = true
+        view.isUserInteractionEnabled = false
+        if view.superview != nil {
+            adlog("AdTopicSurveyElementUI (ad survey)")
+            view.removeFromSuperview()
+        }
+    }
+}
+
 // DSA ad-transparency overlay (AdsPlatform_DSAImpl) — ad-only surface.
 class DSAMainViewKill: ClassHook<NSObject> {
     typealias Group = ScrollFeedAdViewGroup
@@ -337,19 +436,24 @@ func activateEeveeAdBlockerExtended() {
     let initSelector = Selector(("init"))
 
     let loadTargets: [(String, String, () -> Void)] = [
-        (AdsServiceImplKill.targetName, "AdsServiceImpl", { AdsServiceImplGroup().activate() }),
-        (InStreamAdsServiceKill.targetName, "InStreamAdsService", { InStreamAdsServiceGroup().activate() }),
-        (EmbeddedNPVServiceImplKill.targetName, "EmbeddedNPVServiceImpl", { EmbeddedNPVServiceGroup().activate() }),
-        (LeavebehindAdsBaseServiceKill.targetName, "LeavebehindAdsBaseService", { LeavebehindAdsBaseServiceGroup().activate() }),
-        (LeavebehindAdsBaseInternalServiceKill.targetName, "LeavebehindAdsBaseInternalService", { LeavebehindAdsBaseInternalServiceGroup().activate() }),
-        (SponsoredContextServiceKill.targetName, "AdsSponsoredContextServiceImpl", { SponsoredContextServiceGroup().activate() }),
-        (SponsoredContextNPBAttachmentServiceKill.targetName, "AdsSponsoredContextNPBAttachmentServiceImpl", { SponsoredContextNPBAttachmentServiceGroup().activate() }),
-        (SponsoredPlaylistHeaderServiceKill.targetName, "AdsSponsoredPlaylistHeaderServiceImpl", { SponsoredPlaylistHeaderServiceGroup().activate() }),
-        (NativeAdsLoggerServiceImplKill.targetName, "NativeAdsLoggerServiceImpl", { NativeAdsLoggerServiceGroup().activate() }),
-        (EmbeddedAdAdapterElementProviderKill.targetName, "EmbeddedAdAdapterElementProvider", { ScrollFeedAdControllerGroup().activate() }),
-        (PlaylistAdControllerV2Kill.targetName, "PlaylistAdControllerV2", { ScrollFeedAdControllerGroup().activate() }),
-        (PlaylistAdControllerImplKill.targetName, "PlaylistAdControllerImpl", { ScrollFeedAdControllerGroup().activate() }),
-        (LeavebehindAdElementProviderKill.targetName, "LeavebehindAdElementProvider", { ScrollFeedAdControllerGroup().activate() }),
+        (AdsServiceImplKill.targetName, "AdsServiceImpl", { activateOnce(AdsServiceImplGroup.self) { AdsServiceImplGroup() } }),
+        (InStreamAdsServiceKill.targetName, "InStreamAdsService", { activateOnce(InStreamAdsServiceGroup.self) { InStreamAdsServiceGroup() } }),
+        (EmbeddedNPVServiceImplKill.targetName, "EmbeddedNPVServiceImpl", { activateOnce(EmbeddedNPVServiceGroup.self) { EmbeddedNPVServiceGroup() } }),
+        (LeavebehindAdsBaseServiceKill.targetName, "LeavebehindAdsBaseService", { activateOnce(LeavebehindAdsBaseServiceGroup.self) { LeavebehindAdsBaseServiceGroup() } }),
+        (LeavebehindAdsBaseInternalServiceKill.targetName, "LeavebehindAdsBaseInternalService", { activateOnce(LeavebehindAdsBaseInternalServiceGroup.self) { LeavebehindAdsBaseInternalServiceGroup() } }),
+        (SponsoredContextServiceKill.targetName, "AdsSponsoredContextServiceImpl", { activateOnce(SponsoredContextServiceGroup.self) { SponsoredContextServiceGroup() } }),
+        (SponsoredContextNPBAttachmentServiceKill.targetName, "AdsSponsoredContextNPBAttachmentServiceImpl", { activateOnce(SponsoredContextNPBAttachmentServiceGroup.self) { SponsoredContextNPBAttachmentServiceGroup() } }),
+        (SponsoredPlaylistHeaderServiceKill.targetName, "AdsSponsoredPlaylistHeaderServiceImpl", { activateOnce(SponsoredPlaylistHeaderServiceGroup.self) { SponsoredPlaylistHeaderServiceGroup() } }),
+        (NativeAdsLoggerServiceImplKill.targetName, "NativeAdsLoggerServiceImpl", { activateOnce(NativeAdsLoggerServiceGroup.self) { NativeAdsLoggerServiceGroup() } }),
+        (EmbeddedAdAdapterElementProviderKill.targetName, "EmbeddedAdAdapterElementProvider", { activateOnce(ScrollFeedAdControllerGroup.self) { ScrollFeedAdControllerGroup() } }),
+        (PlaylistAdControllerV2Kill.targetName, "PlaylistAdControllerV2", { activateOnce(ScrollFeedAdControllerGroup.self) { ScrollFeedAdControllerGroup() } }),
+        (PlaylistAdControllerImplKill.targetName, "PlaylistAdControllerImpl", { activateOnce(ScrollFeedAdControllerGroup.self) { ScrollFeedAdControllerGroup() } }),
+        (LeavebehindAdElementProviderKill.targetName, "LeavebehindAdElementProvider", { activateOnce(ScrollFeedAdControllerGroup.self) { ScrollFeedAdControllerGroup() } }),
+        (RewardedAdFetchControllerServiceKill.targetName, "RewardedAdFetchControllerService", { activateOnce(AdsStandaloneServiceGroup.self) { AdsStandaloneServiceGroup() } }),
+        (OnDemandAdEventLoggerServiceKill.targetName, "OnDemandAdEventLoggerService", { activateOnce(AdsStandaloneServiceGroup.self) { AdsStandaloneServiceGroup() } }),
+        (InterruptingVideoAdLauncherImplKill.targetName, "InterruptingVideoAdLauncherImpl", { activateOnce(AdsStandaloneServiceGroup.self) { AdsStandaloneServiceGroup() } }),
+        (NativeAdsElementServiceImplKill.targetName, "NativeAdsElementServiceImpl", { activateOnce(NativeAdsServiceGroup.self) { NativeAdsServiceGroup() } }),
+        (DSAServiceImplKill.targetName, "DSAServiceImpl", { activateOnce(NativeAdsServiceGroup.self) { NativeAdsServiceGroup() } }),
     ]
 
     var activated = 0
@@ -369,7 +473,7 @@ func activateEeveeAdBlockerExtended() {
 
     if let cls = findTweakClass(SponsoredCtxAttachmentProbe.targetName),
        class_getInstanceMethod(cls, initSelector) != nil {
-        SponsoredCtxAttachmentGroup().activate()
+        activateOnce(SponsoredCtxAttachmentGroup.self) { SponsoredCtxAttachmentGroup() }
         activated += 1
         ablog("SponsoredCtxAttachment hook activated")
     } else {
@@ -379,7 +483,7 @@ func activateEeveeAdBlockerExtended() {
     let viewSelector = Selector(("didMoveToSuperview"))
     if let cls = findTweakClass(SponsoredPlaylistHeaderViewKill.targetName) as? UIView.Type,
        class_getInstanceMethod(cls, viewSelector) != nil {
-        SponsoredPlaylistHeaderViewGroup().activate()
+        activateOnce(SponsoredPlaylistHeaderViewGroup.self) { SponsoredPlaylistHeaderViewGroup() }
         activated += 1
         ablog("SponsoredPlaylistHeader view fallback activated")
     } else {
@@ -392,7 +496,7 @@ func activateEeveeAdBlockerExtended() {
     // below attaches only if a view-compatible method actually exists.
     if let cls = findTweakClass(EmbeddedAdAdapterElementUIKill.targetName),
        class_getInstanceMethod(cls, viewSelector) != nil {
-        ScrollFeedAdViewGroup().activate()
+        activateOnce(ScrollFeedAdViewGroup.self) { ScrollFeedAdViewGroup() }
         activated += 1
         ablog("EmbeddedAdAdapterElementUI (scroll-feed ad) activated")
     } else {
@@ -401,7 +505,7 @@ func activateEeveeAdBlockerExtended() {
 
     if let cls = findTweakClass(EmbeddedCTAElementsServiceImplKill.targetName),
        class_getInstanceMethod(cls, loadSelector) != nil {
-        ScrollFeedAdServiceGroup().activate()
+        activateOnce(ScrollFeedAdServiceGroup.self) { ScrollFeedAdServiceGroup() }
         activated += 1
         ablog("EmbeddedCTAElementsServiceImpl activated")
     } else {
@@ -410,7 +514,7 @@ func activateEeveeAdBlockerExtended() {
 
     if let cls = findTweakClass(EmbeddedAdControllerServiceImplKill.targetName),
        class_getInstanceMethod(cls, loadSelector) != nil {
-        ScrollFeedAdControllerGroup().activate()
+        activateOnce(ScrollFeedAdControllerGroup.self) { ScrollFeedAdControllerGroup() }
         activated += 1
         ablog("EmbeddedAdControllerServiceImpl activated")
     } else {
@@ -419,7 +523,7 @@ func activateEeveeAdBlockerExtended() {
 
     if let cls = findTweakClass(HtmlAdElementUIKill.targetName),
        class_getInstanceMethod(cls, viewSelector) != nil {
-        ScrollFeedAdViewGroup().activate()
+        activateOnce(ScrollFeedAdViewGroup.self) { ScrollFeedAdViewGroup() }
         activated += 1
         ablog("HtmlAdElementUI fallback activated")
     } else {
@@ -428,12 +532,23 @@ func activateEeveeAdBlockerExtended() {
 
     if let cls = findTweakClass(DSAMainViewKill.targetName),
        class_getInstanceMethod(cls, viewSelector) != nil {
-        ScrollFeedAdViewGroup().activate()
+        activateOnce(ScrollFeedAdViewGroup.self) { ScrollFeedAdViewGroup() }
         activated += 1
         ablog("DSAMainView fallback activated")
     } else {
         ablog("DSAMainView unavailable; skipping")
     }
 
-    ablog("activated \(activated)/\(loadTargets.count + 7) compatible extended hooks")
+    // Ad-topic survey element (NEW in 9.1.90). Runtime-gated so older builds
+    // simply skip it.
+    if let cls = findTweakClass(AdTopicSurveyElementUIKill.targetName),
+       class_getInstanceMethod(cls, viewSelector) != nil {
+        activateOnce(AdsSurveyViewGroup.self) { AdsSurveyViewGroup() }
+        activated += 1
+        ablog("AdTopicSurveyElementUI (ad survey) activated")
+    } else {
+        ablog("AdTopicSurveyElementUI unavailable; skipping")
+    }
+
+    ablog("activated \(activated)/\(loadTargets.count + 8) compatible extended hooks")
 }
